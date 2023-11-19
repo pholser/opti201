@@ -199,3 +199,16 @@ PoolSearchMode = 2, PoolSolutions = n, PoolGap = g:
   to the optimal solution. Requires exploring the tree search more
   than PoolSearchMode = 1.
 
+Multi-scenarios API has some restrictions:
+Cannot:
+* Add/remove variables or constraints
+* Change a variable's type
+* Change the sense of constraints
+
+* To remove a variable, set its bounds to zero
+
+* To add a variable to a scenario, add it to the base model with zero bounds
+  then change the bounds accordingly
+
+* To remove a constraint, change its RHS to +/- GRB.INFINITY
+
