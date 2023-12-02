@@ -212,3 +212,352 @@ Cannot:
 
 * To remove a constraint, change its RHS to +/- GRB.INFINITY
 
+
+gurobipy-pandas
+=====
+Optimization problems define all data, variables, and constraints over
+*indexes*, e.g. (0-1 knapsack)
+
+    $$max \sum_{i \in I} c_i x_i
+    s.t. \sum_{i \in I} a_i x_i \leq b
+         x_i \in \{0, 1\} \forall i \in I$$
+
+These mathematical indexes provide a clear way to structure data in code.
+
+Pandas DataFrame and Series already define *data* over indexes:
+
+```python
+    import numpy as np
+    import pandas as pd
+
+    df = pd.DataFrame(
+        index=pd.RangeIndex(4, name='i'),
+        columns=['a', 'b'],
+        data=np.random.random((4, 2)).round(2)
+    )
+```
+
+We need a way to *define variables* and *build constraints* over the same
+indexes.
+
+`gurobipy-pandas` provides:
+* Methods to create pandas-indexes series of variables
+* Methods to build constraints from expressions
+* Accessors to extract solutions as pandas structures
+
+`pandas` provides:
+* Existing algebraic/split-apply-combine logic
+* Well-known syntax and methods
+
+Installation: `$ pip install gurobipy-pandas`
+
+```python
+    import pandas as pd
+    import gurobipy as gp
+    from gurobipy import GRB
+    import gurobipy_pandas as gppd
+
+    # Handy trick for live coding, not for production
+    gppd.set_interactive()
+
+    # Quiet please
+    gp.setParam('OutputFlag', 0)
+```
+
+Usage:
+* `gurobipy` is the entry point for:
+  - creating models
+  - starting optimization
+  - constants, status codes, etc.
+
+* `gurobipy-pandas` provides accessors and functions to:
+  - create sets of variables based on indexes
+  - create constraints based on aligned series
+  - extract solutions as series
+
+```python
+    m = gp.Model()
+```
+
+Creating variables:
+* Use the free function `gppd.add_vars`
+  - Creates one variable per entry in index
+  - Returns a pandas Series of gurobipy Var objects
+  - Variable names are based on index values
+  - Variable attributes can be set
+
+```python
+    i = pd.RangeIndex(5, name='i')
+
+    x = gppd.add_vars(m, i, name='x', vtype=GRB.BINARY)
+```
+
+* Using the `DataFrame.gppd` accessor
+  - A new DataFrame is returned with an appended column of Vars
+  - Variable attributes can be populated from DataFrame columns
+
+```python
+    data = pd.DataFrame(
+        index=pd.RangeIndex(3, name='i'),
+        data=[1.4, 0.2, 0.7],
+        columns=['u']
+    )
+
+    variables = data.gppd_add_vars(
+        m,
+        name='y',
+        ub='u'
+    )
+```
+
+* Creating expressions
+  - Pandas handles this for us
+  - We always leverage pandas-native functions
+  - Common operations:
+    - Summation
+    - Arithmetic operations
+    - Group-by (split-apply-combine) operations
+
+Single indexes:
+-----
+Consider an index $i \in I$, some variables $x_i$, and some data $c_i.
+
+```python
+    i = pd.RangeIndex(5, name='i')
+
+    x = gppd_add_vars(m, i, name='x')
+
+    c = pd.Series(index=i, name='c', data=np.arange(1, 6))
+```
+
+Arithmetic with scalars: $2x_i + 5 \forall i \in I$
+```python
+    2*x + 5
+```
+* Produces a new Series on the same index
+* One linear expression per entry in the index
+
+Summation: $\sum_{i} x_i$
+```python
+    x.sum()
+```
+* Produces a single linear expression
+* Sums the whole series over the index
+
+Arithmetic with series: $c_i x_i \forall i \in I$
+```python
+    c * x
+```
+* Produces a new series on the same index
+* Pointwise product for each entry in the index
+
+Summing the result: $\sum_{i} c_i x_i$
+```python
+    (c * x).sum()
+```
+* Produces a single linear expression
+* Take our pointwise product series, sum over the index
+
+Hopefully this looks familiar. Any operation you would do with data in pandas,
+you can do in the same way with data and variables.
+
+Multi-index:
+* Allows us to add dimension for data and variables
+* Start with an example DataFrame, representing the data $p_{ij}$
+
+```python
+    data = pd.DataFrame({
+        'i': [0, 0, 1, 2, 2],
+        'j': [1, 2, 0, 0, 1],
+        'p': [0.1, 0.6, 1.2, 0.4, 0.9]
+    }).set_index(['i', 'j'])
+```
+
+Add corresponding variables $y_{ij}$ as a series:
+```python
+    y = gppd.add_vars(m, data, name='y')
+```
+
+Grouped summation: $\sum_{i \in I} y_{ij} \forall j \in J$
+```python
+    y.groupby('j').sum()
+```
+* For each $j$, sum $y_{ij}$ terms over all corresponding valid $i$ values
+* Produce a Series of linear expressions, indexed by $j$
+
+Align data on partial indexes: $c_j y_{ij} \forall i, j$
+* For each $y_ij$ and $c_j$, join on the corresponding $j$
+* Pandas defines how this alignment is done
+* Index _names_ are important
+```python
+    c = pd.Series(index=pd.RangeIndex(3, name='j'),
+                  data=[1.0, 2.0, 3.0],
+                  name='c')
+
+    c * y
+```
+
+Pandas arithmetic:
+* Pandas aligns before applying arithmetic operators
+* Because pandas performs all the alignment, it follows pandas' defined
+  behavior:
+  - Joining
+  - Matching
+  - Aligning
+  - Broadcasting
+
+* Lastly: $\sum_{j \in J} c_j y_{ij} \forall i \in I$
+  - Use the series $c * y$
+  - Apply the same groupby-aggregate operation as before
+  - Result is a series indexed by $i$
+```python
+    (c * y).groupby('i').sum()
+```
+
+Creating constraints:
+* Indexes must align between two series
+* Aim to build vectorized constraints -- no manual iteration
+e.g. $\sum_{j \in J} c_j y_{ij} \leq b_i \forall i \in I$
+```python
+    (c * y).groupby('i').sum()
+    b = pd.Series(index=pd.RangeIndex(3, name='i'),
+                  data=[1, 2, 3])
+```
+
+Using free functions:
+* `gppd.add_constrs`
+* Returns a series of constraint handles
+```python
+    constraints = gppd.add_constrs(
+        m,
+        (c * y).groupby('i').sum(),
+        GRB.LESS_EQUAL,
+        b,
+        name='constr'
+    )
+```
+
+Inspecting the result:
+* Check linear terms using `model.getRow`
+* Coefficients in the `RHS` attribute
+```python
+    constraints.apply(model.getRow)
+
+    constraints.gppd.RHS
+```
+
+Missing data:
+* Unaligned data is filled in arithmetic operations
+* Missing data is represented using `NaN`s
+
+Using `DataFrame.gppd` accessors:
+* Enables method chaining
+* Uses pandas `eval`-like syntax
+* One constraint added per row
+```python
+    data = pd.DataFrame({
+        'i': [0, 0, 1, 2, 2],
+        'j': [1, 2, 0, 0, 1],
+        'p': [0.1, 0.6, 1.2, 0.4, 0.9]
+    }).set_index(['i', 'j'])
+
+    vars_and_constrs = (
+        data.gppd.add_vars(m, name='y')
+            .gppd.add_vars(m, name='z')
+            .gppd.add_constrs(m, 'y + z <= 1', name='c1')
+    )
+```
+
+Setting the objective:
+* Objectives are set from single expressions
+* No `gurobipy-pandas` method here (no vectorized operations)
+```python
+    m.setObjective(y.sum(), sense=GRB.MAXIMIZE)
+    m.update()
+```
+
+Extracting solutions:
+* In `gurobipy`, solutions are retrieved from the `X` attributes of
+  Vars
+* `gppd` Series accessor vectorizes this operation
+* Works for any attribute (bounds, coefficients, RHS, etc.)
+* Returns a Series on the same index
+```python
+    m.optimize()
+
+    y.gppd.X
+```
+
+Example:
+* Given a set of projects $i \in I$ and teams $j \in J$
+* Project $i$ requires $w_i$ resources to complete
+* Each team has capacity $c_j$
+* If team $j$ completes project $i$, we profit $p_{ij}$
+* Goal: maximize the value of completed projects, while respecting team
+  capacities
+
+The data:
+* _Before_ taking any modeling steps, prepare your data properly
+* Clearly define your model indexes; align DataFrames to these indexes
+* Keep data reading and cleaning separate from model building
+
+```python
+    projects = pd.read_csv('projects.csv', index_col='project')
+    teams = pd.read_csv('teams.csv', index_col='team')
+    project_values = pd.read_csv('project_values.csv',
+                                 index_col=['project', 'team'])
+```
+
+Sparsity:
+* Note that the model is not defined over all $(i, j)$ pairs
+* Not all teams can complete all projects
+* Structure of the data matches the model
+
+Define variables and objective:
+* Maximize total value of completed projects
+
+    $$max \sum_{i \in I} \sum_{j \in J} p_{ij} x_{ij}
+      s.t. x_{ij} \in \{0, 1\} \forall (i, j)$$
+
+```python
+model = gp.Model()
+model.ModelSense = GRB.MAXIMIZE
+x = gpdd.add_vars(model, project_values, vtype=GRB.BINARY, obj='profit'
+                  name='x')
+```
+
+Capacity constraint:
+* Assigned projects are limited by team capacity:
+
+    $$\sum_{i \in I} w_i * x_{ij} \leq c_j \forall j \in J$$
+
+* Each project is allocated at most once:
+
+    $$\sum_{j \in J} x_{ij} \leq 1 \forall i \in I
+
+```python
+    capacity_constraints = gppd.add_constrs(
+        model,
+        (
+            (projects['resource'] * x)
+            .groupby('team')
+            .sum()
+        ),
+        GRB.LESS_EQUAL,
+        teams['capacity'],
+        name='capacity'
+    )
+
+    allocate_once = gppd.add_constrs(
+        model,
+        x.groupby('project').sum(),
+        GRB.LESS_EQUAL,
+        1.0,
+        name='allocate_once'
+    )
+
+    model.optimize()
+
+    x.gppd.X   # retrieve values of solution
+```
+
